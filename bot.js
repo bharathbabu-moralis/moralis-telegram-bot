@@ -4,7 +4,7 @@ const {
   fetchAndStoreSwaps,
   processStoredSwaps,
   cleanupOldSwaps,
-} = require("pollingService");
+} = require("./pollingService");
 const GroupConfig = require("./models/GroupConfig");
 require("dotenv").config();
 
