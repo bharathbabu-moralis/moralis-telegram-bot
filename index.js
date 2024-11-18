@@ -1,29 +1,16 @@
-// src/index.js
 require("dotenv").config();
 const express = require("express");
 const app = express();
-const bot = require("./bot");
 
-// Basic route to keep the app alive
-app.get("/", (req, res) => {
-  res.send("Bot is running!");
-});
+try {
+  const bot = require("./bot");
+  console.log("Bot loaded successfully");
+} catch (error) {
+  console.error("Error loading bot:", error);
+  process.exit(1);
+}
 
-// Error handling
-process.on("unhandledRejection", (error) => {
-  console.error("Unhandled promise rejection:", error);
-});
+app.get("/", (req, res) => res.send("Bot Running"));
 
-process.on("uncaughtException", (error) => {
-  console.error("Uncaught exception:", error);
-  bot
-    .stopPolling()
-    .then(() => process.exit(1))
-    .catch(() => process.exit(1));
-});
-
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on port ${port}`));
