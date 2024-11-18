@@ -1,5 +1,5 @@
 const axios = require("axios");
-const TokenMetadata = require("./models/TokenMetadata");
+const TokenMetadata = require("./TokenMetadata");
 
 async function refreshTokenMetadata() {
   console.log("Starting token metadata refresh...");

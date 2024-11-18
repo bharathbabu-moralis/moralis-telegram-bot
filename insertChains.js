@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const Chain = require("./models/Chain"); // Assuming Chain model is in `models/Chain.js`
+const Chain = require("./Chain"); // Assuming Chain model is in `models/Chain.js`
 require("dotenv").config();
 
 async function insertChainData() {

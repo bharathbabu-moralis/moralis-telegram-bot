@@ -1,9 +1,9 @@
 // pollingService.js
 const axios = require("axios");
-const GroupConfig = require("./models/GroupConfig");
-const SwapData = require("./models/SwapData");
-const TokenMetadata = require("./models/TokenMetadata");
-const Chain = require("./models/Chain");
+const GroupConfig = require("./GroupConfig");
+const SwapData = require("./SwapData");
+const TokenMetadata = require("./TokenMetadata");
+const Chain = require("./Chain");
 const Queue = require("better-queue");
 
 // Rate limit handler

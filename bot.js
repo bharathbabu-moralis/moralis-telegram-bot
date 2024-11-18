@@ -5,7 +5,7 @@ const {
   processStoredSwaps,
   cleanupOldSwaps,
 } = require("./pollingService");
-const GroupConfig = require("./models/GroupConfig");
+const GroupConfig = require("./GroupConfig");
 require("dotenv").config();
 
 const bot = new TelegramBot(process.env.BOT_API_TOKEN, {
