@@ -221,8 +221,8 @@ async function processStoredSwaps(bot) {
             // Calculate swap amounts
             const swapAmount = Math.abs(
               swap.transaction_type === "buy"
-                ? swap.token1.usd_amount // Amount spent in USD for buys
-                : swap.token0.usd_amount // Amount received in USD for sells
+                ? swap.token1.usd_amount
+                : swap.token0.usd_amount
             );
 
             // Check criteria for each config
@@ -276,57 +276,52 @@ async function processStoredSwaps(bot) {
               }
             }
 
+            // Add batch notification processing
             if (notifications.length > 0) {
-              // Prepare message template
               const messageTemplate = await prepareMessageTemplate(
                 swap,
                 chainInfo,
                 address
               );
 
-              // Send notifications with rate limiting
-              for (const config of notifications) {
-                try {
-                  await sendNotification(bot, config, messageTemplate);
-
-                  // Record successful notification
-                  await SwapData.updateOne(
-                    { _id: swapData._id },
-                    {
-                      $push: {
-                        notifications: {
-                          chatId: config.chatId,
-                          sentAt: new Date(),
-                          success: true,
+              // Process notifications in parallel for better performance
+              await Promise.allSettled(
+                notifications.map(async (config) => {
+                  try {
+                    await sendNotification(bot, config, messageTemplate);
+                    await SwapData.updateOne(
+                      { _id: swapData._id },
+                      {
+                        $push: {
+                          notifications: {
+                            chatId: config.chatId,
+                            sentAt: new Date(),
+                            success: true,
+                          },
                         },
-                      },
-                    }
-                  );
-                } catch (error) {
-                  console.error(
-                    `Failed to send notification to ${config.name}:`,
-                    error
-                  );
-
-                  // Record failed notification
-                  await SwapData.updateOne(
-                    { _id: swapData._id },
-                    {
-                      $push: {
-                        notifications: {
-                          chatId: config.chatId,
-                          sentAt: new Date(),
-                          success: false,
-                          error: error.message,
+                      }
+                    );
+                  } catch (error) {
+                    console.error(
+                      `Notification failed for ${config.name}:`,
+                      error
+                    );
+                    await SwapData.updateOne(
+                      { _id: swapData._id },
+                      {
+                        $push: {
+                          notifications: {
+                            chatId: config.chatId,
+                            sentAt: new Date(),
+                            success: false,
+                            error: error.message,
+                          },
                         },
-                      },
-                    }
-                  );
-                }
-
-                // Add delay between notifications
-                await new Promise((resolve) => setTimeout(resolve, 1000));
-              }
+                      }
+                    );
+                  }
+                })
+              );
             }
 
             // Mark swap as processed
