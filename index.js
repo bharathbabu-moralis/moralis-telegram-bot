@@ -1,5 +1,5 @@
 require("dotenv").config();
-const bot = require("./bot");
+const bot = require("bot");
 
 process.on("unhandledRejection", (error) => {
   console.error("Unhandled promise rejection:", error);
