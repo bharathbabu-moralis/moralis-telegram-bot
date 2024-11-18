@@ -1,17 +1,19 @@
 {
-  "name": "moralis-telegram-bot",
+  "name": "telegram-trading-bot",
   "version": "1.0.0",
-  "description": "Telegram bot for tracking transactions",
-  "main": "src/index.js",
+  "main": "index.js",
+  "engines": {
+    "node": "18.x"
+  },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.61.0",
-    "mongoose": "^7.x",
-    "dotenv": "^16.x",
-    "axios": "^1.x",
-    "better-queue": "^3.x"
+    "axios": "^1.6.2",
+    "better-queue": "^3.8.12",
+    "dotenv": "^16.3.1",
+    "mongoose": "^7.6.5",
+    "node-telegram-bot-api": "^0.64.0",
+    "express": "^4.18.2"
   }
 }
