@@ -360,47 +360,6 @@ async function processStoredSwaps(bot) {
   }
 }
 
-// Helper functions for message preparation and sending
-async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
-  const isBuyTransaction = swap.transaction_type === "buy";
-
-  // Determine which token is the one we're tracking
-  const trackedTokenIsToken0 =
-    swap.token0.address.toLowerCase() === trackedTokenAddress.toLowerCase();
-  const trackedToken = trackedTokenIsToken0 ? swap.token0 : swap.token1;
-
-  // Get proper token price
-  const price = trackedToken.usd_price.toFixed(2);
-
-  // For notification formatting
-  const tokenSpent = swap.token_sold === "token0" ? swap.token0 : swap.token1;
-  const tokenReceived =
-    swap.token_bought === "token1" ? swap.token1 : swap.token0;
-
-  return {
-    type: isBuyTransaction ? "🟢 Buy" : "🔴 Sell",
-    exchange: swap.pair_label || "Unknown Exchange",
-    amounts: {
-      spent: {
-        usd: Math.abs(tokenSpent.usd_amount).toFixed(2),
-        tokens: Math.abs(tokenSpent.amount).toFixed(4),
-        symbol: tokenSpent.symbol,
-      },
-      received: {
-        tokens: Math.abs(tokenReceived.amount).toFixed(4),
-        symbol: tokenReceived.symbol,
-      },
-    },
-    price, // This is now the tracked token's price
-    wallet: swap.wallet_address,
-    urls: {
-      explorer: chainInfo.explorer_url,
-      tx: swap.transaction_hash,
-      chart: `${chainInfo.chart_url_base}${trackedTokenAddress}`,
-    },
-  };
-}
-
 async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
   const isBuyTransaction = swap.transaction_type === "buy";
 
