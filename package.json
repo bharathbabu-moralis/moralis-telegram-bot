@@ -1,20 +1,21 @@
 {
-  "name": "bot-server",
+  "name": "telegram-trading-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Telegram bot for tracking crypto transactions",
+  "main": "src/index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "axios": "^1.7.7",
+    "axios": "^1.6.2",
     "better-queue": "^3.8.12",
-    "dotenv": "^16.4.5",
-    "mongoose": "^8.8.1",
-    "node-telegram-bot-api": "^0.66.0"
+    "dotenv": "^16.3.1",
+    "mongoose": "^7.6.5",
+    "node-telegram-bot-api": "^0.64.0",
+    "express": "^4.18.2"  
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }

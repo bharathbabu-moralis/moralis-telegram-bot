@@ -1,6 +1,15 @@
+// src/index.js
 require("dotenv").config();
+const express = require("express");
+const app = express();
 const bot = require("./bot");
 
+// Basic route to keep the app alive
+app.get("/", (req, res) => {
+  res.send("Bot is running!");
+});
+
+// Error handling
 process.on("unhandledRejection", (error) => {
   console.error("Unhandled promise rejection:", error);
 });
@@ -13,14 +22,8 @@ process.on("uncaughtException", (error) => {
     .catch(() => process.exit(1));
 });
 
-// For Heroku - keep alive
-const http = require("http");
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Bot is running\n");
-});
-
-const port = process.env.PORT || 3000;
-server.listen(port, () => {
-  console.log(`HTTP server running on port ${port}`);
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
 });
