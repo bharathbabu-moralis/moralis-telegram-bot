@@ -1,12 +1,10 @@
-// pollingService.js
 const axios = require("axios");
 const GroupConfig = require("./models/GroupConfig");
-const SwapData = require("./SwapData");
-const TokenMetadata = require("./models/TokenMetadata");
+const SwapData = require("./models/SwapData");
 const Chain = require("./models/Chain");
 const Queue = require("better-queue");
 
-// Rate limit handler
+// Rate limit handler for Telegram notifications
 class RateLimitHandler {
   constructor() {
     this.waitTimes = new Map();
@@ -33,13 +31,12 @@ class RateLimitHandler {
 
 const rateLimitHandler = new RateLimitHandler();
 
-// Create message queue
+// Message queue for rate-limited notifications
 const messageQueue = new Queue(
   async function (task, cb) {
     const { bot, chatId, message, options } = task;
 
     try {
-      // Check rate limit
       if (rateLimitHandler.shouldWait(chatId)) {
         const waitTime = rateLimitHandler.getWaitTime(chatId);
         throw new Error(
@@ -48,23 +45,20 @@ const messageQueue = new Queue(
       }
 
       await bot.sendMessage(chatId, message, options);
-      cb(null); // Success
+      cb(null);
     } catch (error) {
       if (error.message.includes("Too Many Requests")) {
-        // Extract retry time from error message
         const match = error.message.match(/retry after (\d+)/);
         const retrySeconds = match ? parseInt(match[1]) : 10;
-
         rateLimitHandler.setWaitTime(chatId, retrySeconds);
 
-        // Requeue the message with delay
         setTimeout(() => {
           messageQueue.push(task);
         }, retrySeconds * 1000 + 100);
 
-        cb(null); // Don't treat as error, just requeued
+        cb(null);
       } else {
-        cb(error); // Real error
+        cb(error);
       }
     }
   },
@@ -75,87 +69,107 @@ const messageQueue = new Queue(
   }
 );
 
-// Helper functions
-function formatChatId(chatId, type, isPublic = false, username = null) {
-  if (!chatId || type !== "channel") return chatId;
-
-  if (isPublic) {
-    if (username) {
-      return username.startsWith("@") ? username : `@${username}`;
-    }
-    if (isNaN(chatId)) {
-      return chatId.startsWith("@") ? chatId : `@${chatId}`;
-    }
-  }
-
-  const cleanId = chatId.replace(/[^\d]/g, "");
-  return `-100${cleanId}`;
+// Get unique token+chain combinations from active configs
+async function getUniqueActiveTokens() {
+  return GroupConfig.aggregate([
+    {
+      $match: {
+        "tracking.active": true,
+        "tracking.token.address": { $exists: true },
+        "tracking.token.chain": { $exists: true },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          address: "$tracking.token.address",
+          chain: "$tracking.token.chain",
+        },
+        configs: { $push: "$$ROOT" },
+      },
+    },
+  ]);
 }
 
-// Fetch and store new swaps
-async function fetchAndStoreSwaps() {
+// Fetch swaps for a single token
+async function fetchSwapsForToken(tokenAddress, chain) {
   try {
-    const configs = await GroupConfig.find({
-      "tracking.active": true,
-      "tracking.token.address": { $exists: true },
-    }).lean();
+    const response = await axios.get(
+      `https://deep-index-beta.moralis.io/api/v2.2/erc20/${tokenAddress}/swaps`,
+      {
+        params: {
+          chain,
+          order: "DESC",
+          limit: 100,
+        },
+        headers: { "X-API-Key": process.env.MORALIS_API_KEY },
+      }
+    );
 
-    console.log(`Fetching swaps for ${configs.length} active configurations`);
+    if (!response.data?.result) {
+      console.log(`No swaps found for ${tokenAddress} on ${chain}`);
+      return [];
+    }
 
-    for (const config of configs) {
-      try {
-        const { address: tokenAddress, chain } = config.tracking.token;
+    return response.data.result;
+  } catch (error) {
+    console.error(
+      `Error fetching swaps for ${tokenAddress} on ${chain}:`,
+      error.message
+    );
+    throw error;
+  }
+}
 
-        // Get latest stored swap
-        const latestSwap = await SwapData.findOne({
+// Store swaps with bulk operation
+async function storeSwaps(swaps, tokenAddress, chain) {
+  if (swaps.length === 0) return;
+
+  const bulkOps = swaps.map((swap) => ({
+    updateOne: {
+      filter: { transaction_hash: swap.transaction_hash },
+      update: {
+        $setOnInsert: {
           tokenAddress,
           chain,
-        })
-          .sort({ block_timestamp: -1 })
-          .lean();
+          transaction_hash: swap.transaction_hash,
+          block_timestamp: new Date(swap.block_timestamp),
+          swap_data: swap,
+          processed: false,
+        },
+      },
+      upsert: true,
+    },
+  }));
 
-        // Fetch new swaps
-        const response = await axios.get(
-          `https://deep-index-beta.moralis.io/api/v2.2/erc20/${tokenAddress}/swaps`,
-          {
-            params: {
-              chain,
-              order: "DESC",
-              limit: 100,
-            },
-            headers: { "X-API-Key": process.env.MORALIS_API_KEY },
-          }
-        );
+  try {
+    const result = await SwapData.bulkWrite(bulkOps);
+    console.log(
+      `Stored ${result.upsertedCount} new swaps for ${tokenAddress} on ${chain}`
+    );
+    return result.upsertedCount;
+  } catch (error) {
+    console.error(`Error storing swaps for ${tokenAddress}:`, error.message);
+    throw error;
+  }
+}
 
-        if (!response.data?.result) continue;
+// Main fetch and store function
+async function fetchAndStoreSwaps() {
+  try {
+    const uniqueTokens = await getUniqueActiveTokens();
+    console.log(
+      `Fetching swaps for ${uniqueTokens.length} unique token combinations`
+    );
 
-        // Store new swaps
-        const bulkOps = response.data.result.map((swap) => ({
-          updateOne: {
-            filter: { transaction_hash: swap.transaction_hash },
-            update: {
-              $setOnInsert: {
-                tokenAddress,
-                chain,
-                transaction_hash: swap.transaction_hash,
-                block_timestamp: new Date(swap.block_timestamp),
-                swap_data: swap,
-                processed: false,
-              },
-            },
-            upsert: true,
-          },
-        }));
-
-        if (bulkOps.length > 0) {
-          await SwapData.bulkWrite(bulkOps);
-          console.log(
-            `Stored ${bulkOps.length} new swaps for ${tokenAddress} on ${chain}`
-          );
-        }
+    for (const token of uniqueTokens) {
+      try {
+        const { address, chain } = token._id;
+        const swaps = await fetchSwapsForToken(address, chain);
+        await storeSwaps(swaps, address, chain);
       } catch (error) {
         console.error(
-          `Error fetching swaps for token ${config.tracking.token.address}:`,
+          `Failed processing token ${token._id.address}:`,
           error.message
         );
         continue;
@@ -169,185 +183,126 @@ async function fetchAndStoreSwaps() {
 // Process stored swaps
 async function processStoredSwaps(bot) {
   try {
-    // Get active token configurations
-    const activeTokens = await GroupConfig.aggregate([
-      {
-        $match: {
-          "tracking.active": true,
-          "tracking.token.address": { $exists: true },
-          "tracking.token.chain": { $exists: true },
-          "tracking.startTime": { $exists: true }, // Make sure startTime exists
-        },
-      },
-      {
-        $group: {
-          _id: {
-            address: "$tracking.token.address",
-            chain: "$tracking.token.chain",
-          },
-          configs: { $push: "$$ROOT" },
-        },
-      },
-    ]);
+    const uniqueTokens = await getUniqueActiveTokens();
 
-    console.log(`Processing ${activeTokens.length} token configurations`);
+    for (const tokenGroup of uniqueTokens) {
+      const { address, chain } = tokenGroup._id;
 
-    for (const tokenGroup of activeTokens) {
-      try {
-        const { address, chain } = tokenGroup._id;
+      const unprocessedSwaps = await SwapData.find({
+        tokenAddress: address,
+        chain,
+        processed: false,
+      })
+        .sort({ block_timestamp: 1 })
+        .limit(50)
+        .lean();
 
-        // Get unprocessed swaps
-        const unprocessedSwaps = await SwapData.find({
-          tokenAddress: address,
-          chain,
-          processed: false,
-        })
-          .sort({ block_timestamp: 1 })
-          .limit(50)
-          .lean();
+      if (unprocessedSwaps.length === 0) continue;
 
-        if (unprocessedSwaps.length === 0) continue;
+      const chainInfo = await Chain.findOne({ chain_name: chain }).lean();
+      if (!chainInfo) continue;
 
-        const chainInfo = await Chain.findOne({ chain_name: chain }).lean();
-        if (!chainInfo) continue;
+      for (const swapData of unprocessedSwaps) {
+        try {
+          const swap = swapData.swap_data;
+          const swapTimestamp = new Date(swap.block_timestamp);
+          const notifications = [];
 
-        // Process each swap
-        for (const swapData of unprocessedSwaps) {
-          try {
-            const swap = swapData.swap_data;
-            const swapTimestamp = new Date(swap.block_timestamp);
-            const notifications = [];
+          // Calculate swap amount once
+          const swapAmount = Math.abs(
+            swap.transaction_type === "buy"
+              ? swap.token1.usd_amount
+              : swap.token0.usd_amount
+          );
 
-            // Calculate swap amounts
-            const swapAmount = Math.abs(
-              swap.transaction_type === "buy"
-                ? swap.token1.usd_amount
-                : swap.token0.usd_amount
-            );
-
-            // Check criteria for each config
-            for (const config of tokenGroup.configs) {
-              try {
-                // Skip if swap is before tracking start time
-                if (
-                  config.tracking.startTime &&
-                  swapTimestamp < new Date(config.tracking.startTime)
-                ) {
-                  continue;
-                }
-
-                const { minValue, transactionType } = config.tracking.filters;
-
-                // Check minimum value
-                const meetsMinValue = swapAmount >= minValue;
-                if (!meetsMinValue) {
-                  console.log(
-                    `Swap amount ${swapAmount} below minimum ${minValue} for ${config.name}`
-                  );
-                  continue;
-                }
-
-                // Check transaction type
-                const matchesTransactionType =
-                  transactionType === "both" ||
-                  (transactionType === "buy" &&
-                    swap.transaction_type === "buy") ||
-                  (transactionType === "sell" &&
-                    swap.transaction_type === "sell");
-
-                if (!matchesTransactionType) {
-                  console.log(
-                    `Transaction type ${swap.transaction_type} doesn't match filter ${transactionType} for ${config.name}`
-                  );
-                  continue;
-                }
-
-                // All criteria met
-                notifications.push(config);
-                console.log(
-                  `Notification queued for ${config.name} - Amount: ${swapAmount}, Type: ${swap.transaction_type}`
-                );
-              } catch (configError) {
-                console.error(
-                  `Error checking criteria for ${config.name}:`,
-                  configError
-                );
-                continue;
-              }
+          // Check all configs for this token
+          for (const config of tokenGroup.configs) {
+            // Skip if swap is before tracking start time
+            if (
+              config.tracking.startTime &&
+              swapTimestamp < new Date(config.tracking.startTime)
+            ) {
+              continue;
             }
 
-            // Add batch notification processing
-            if (notifications.length > 0) {
-              const messageTemplate = await prepareMessageTemplate(
-                swap,
-                chainInfo,
-                address
-              );
+            const { minValue, transactionType } = config.tracking.filters;
 
-              // Process notifications in parallel for better performance
-              await Promise.allSettled(
-                notifications.map(async (config) => {
-                  try {
-                    await sendNotification(bot, config, messageTemplate);
-                    await SwapData.updateOne(
-                      { _id: swapData._id },
-                      {
-                        $push: {
-                          notifications: {
-                            chatId: config.chatId,
-                            sentAt: new Date(),
-                            success: true,
-                          },
-                        },
-                      }
-                    );
-                  } catch (error) {
-                    console.error(
-                      `Notification failed for ${config.name}:`,
-                      error
-                    );
-                    await SwapData.updateOne(
-                      { _id: swapData._id },
-                      {
-                        $push: {
-                          notifications: {
-                            chatId: config.chatId,
-                            sentAt: new Date(),
-                            success: false,
-                            error: error.message,
-                          },
-                        },
-                      }
-                    );
-                  }
-                })
-              );
-            }
+            // Check criteria
+            if (swapAmount < minValue) continue;
 
-            // Mark swap as processed
-            await SwapData.updateOne(
-              { _id: swapData._id },
-              {
-                $set: {
-                  processed: true,
-                  processedAt: new Date(),
-                },
-              }
-            );
-          } catch (swapError) {
-            console.error(
-              `Error processing swap ${swapData.transaction_hash}:`,
-              swapError
-            );
-            continue;
+            const matchesType =
+              transactionType === "both" ||
+              transactionType === swap.transaction_type;
+
+            if (!matchesType) continue;
+
+            notifications.push(config);
           }
+
+          if (notifications.length > 0) {
+            const messageTemplate = await prepareMessageTemplate(
+              swap,
+              chainInfo,
+              address
+            );
+
+            // Send notifications
+            await Promise.allSettled(
+              notifications.map(async (config) => {
+                try {
+                  await sendNotification(bot, config, messageTemplate);
+                  await SwapData.updateOne(
+                    { _id: swapData._id },
+                    {
+                      $push: {
+                        notifications: {
+                          chatId: config.chatId,
+                          sentAt: new Date(),
+                          success: true,
+                        },
+                      },
+                    }
+                  );
+                } catch (error) {
+                  console.error(
+                    `Notification failed for ${config.chatId}:`,
+                    error.message
+                  );
+                  await SwapData.updateOne(
+                    { _id: swapData._id },
+                    {
+                      $push: {
+                        notifications: {
+                          chatId: config.chatId,
+                          sentAt: new Date(),
+                          success: false,
+                          error: error.message,
+                        },
+                      },
+                    }
+                  );
+                }
+              })
+            );
+          }
+
+          // Mark as processed
+          await SwapData.updateOne(
+            { _id: swapData._id },
+            {
+              $set: {
+                processed: true,
+                processedAt: new Date(),
+              },
+            }
+          );
+        } catch (error) {
+          console.error(
+            `Error processing swap ${swapData.transaction_hash}:`,
+            error.message
+          );
+          continue;
         }
-      } catch (tokenError) {
-        console.error(
-          `Error processing token ${tokenGroup._id.address}:`,
-          tokenError
-        );
-        continue;
       }
     }
   } catch (error) {
@@ -355,18 +310,13 @@ async function processStoredSwaps(bot) {
   }
 }
 
+// Helper function to prepare notification message
 async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
   const isBuyTransaction = swap.transaction_type === "buy";
-
-  // Determine which token is the one we're tracking
   const trackedTokenIsToken0 =
     swap.token0.address.toLowerCase() === trackedTokenAddress.toLowerCase();
   const trackedToken = trackedTokenIsToken0 ? swap.token0 : swap.token1;
-
-  // Get proper token price
   const price = trackedToken.usd_price.toFixed(2);
-
-  // For notification formatting
   const tokenSpent = swap.token_sold === "token0" ? swap.token0 : swap.token1;
   const tokenReceived =
     swap.token_bought === "token1" ? swap.token1 : swap.token0;
@@ -385,7 +335,7 @@ async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
         symbol: tokenReceived.symbol,
       },
     },
-    price, // This is now the tracked token's price
+    price,
     wallet: swap.wallet_address,
     urls: {
       explorer: chainInfo.explorer_url,
@@ -395,6 +345,7 @@ async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
   };
 }
 
+// Send notification with rate limiting
 async function sendNotification(bot, config, template) {
   const formattedChatId = formatChatId(
     config.chatId,
@@ -402,7 +353,6 @@ async function sendNotification(bot, config, template) {
     config.isPublic,
     config.username
   );
-
   const emojiCount = Math.min(
     17,
     Math.max(1, Math.floor(parseFloat(template.amounts.spent.usd) / 50))
@@ -427,7 +377,6 @@ ${emoji}\n\n
   }">Chart</a>
   `.trim();
 
-  // Queue the message instead of sending directly
   return new Promise((resolve, reject) => {
     messageQueue.push(
       {
@@ -444,7 +393,6 @@ ${emoji}\n\n
           reject(err);
         } else {
           try {
-            // Update last active only on successful send
             await GroupConfig.updateOne(
               { chatId: config.chatId },
               { $set: { "metadata.lastActive": new Date() } }
@@ -459,7 +407,7 @@ ${emoji}\n\n
   });
 }
 
-// Cleanup function
+// Cleanup old processed swaps
 async function cleanupOldSwaps() {
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -470,7 +418,23 @@ async function cleanupOldSwaps() {
   });
 }
 
-// Export functions
+// Format chat ID helper
+function formatChatId(chatId, type, isPublic = false, username = null) {
+  if (!chatId || type !== "channel") return chatId;
+
+  if (isPublic) {
+    if (username) {
+      return username.startsWith("@") ? username : `@${username}`;
+    }
+    if (isNaN(chatId)) {
+      return chatId.startsWith("@") ? chatId : `@${chatId}`;
+    }
+  }
+
+  const cleanId = chatId.replace(/[^\d]/g, "");
+  return `-100${cleanId}`;
+}
+
 module.exports = {
   fetchAndStoreSwaps,
   processStoredSwaps,
