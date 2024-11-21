@@ -180,11 +180,10 @@ bot.onText(/\/start/, async (msg) => {
   if (existingConfig.length === 0) {
     bot.sendMessage(
       userId,
-      "Welcome! I can help you track transactions. Choose where you want to set up tracking:",
+      "Welcome! I can help you track transactions in your channel. To get started:",
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "Set up for a Group", callback_data: "setup_group" }],
             [{ text: "Set up for a Channel", callback_data: "setup_channel" }],
           ],
         },
