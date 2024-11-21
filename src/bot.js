@@ -1,11 +1,14 @@
 const TelegramBot = require("node-telegram-bot-api");
 const mongoose = require("mongoose");
+const axios = require("axios");
 const {
   fetchAndStoreSwaps,
   processStoredSwaps,
   cleanupOldSwaps,
 } = require("./pollingService");
 const GroupConfig = require("./models/GroupConfig");
+const TokenMetadata = require("./models/TokenMetadata");
+const { updateTokenMetadata } = require("./tokenMetadataService");
 require("dotenv").config();
 
 const bot = new TelegramBot(process.env.BOT_API_TOKEN, {
@@ -59,6 +62,30 @@ const VALID_CHAINS = [
     icon: "🔴",
   },
 ];
+
+async function fetchTokenMetadata(address, chain) {
+  try {
+    const response = await axios.get(
+      "https://deep-index.moralis.io/api/v2.2/erc20/metadata",
+      {
+        params: {
+          chain,
+          addresses: [address],
+        },
+        headers: { "X-API-Key": process.env.MORALIS_API_KEY },
+      }
+    );
+
+    if (!response.data?.[0]) {
+      throw new Error("Token metadata not found");
+    }
+
+    return response.data[0];
+  } catch (error) {
+    console.error("Error fetching token metadata:", error);
+    throw error;
+  }
+}
 
 const userSessions = {};
 
@@ -171,7 +198,6 @@ bot.onText(/\/start/, async (msg) => {
   }
 });
 
-// My chat member handler
 bot.on("my_chat_member", async (chatMember) => {
   const chat = chatMember.chat;
   const newStatus = chatMember.new_chat_member.status;
@@ -191,6 +217,7 @@ bot.on("my_chat_member", async (chatMember) => {
     }
 
     try {
+      // Store config first
       const config = await GroupConfig.findOneAndUpdate(
         { chatId },
         {
@@ -216,25 +243,48 @@ bot.on("my_chat_member", async (chatMember) => {
         { upsert: true, new: true }
       );
 
-      const messageId = formatChatId(chatId, chatType, isPublic, chat.username);
+      // For sending messages, use different IDs based on type
+      const sendToId =
+        chatType === "channel"
+          ? formatChatId(chatId, chatType, isPublic, chat.username)
+          : chat.id; // For groups, use raw chat.id
 
-      try {
-        await bot.sendMessage(
-          messageId,
-          "✅ Bot setup initialized! I'll send transaction notifications here."
-        );
+      // Add retry logic for sending initial message
+      let messageSent = false;
+      const maxRetries = 3;
+      const retryDelay = 2000;
 
-        bot.sendMessage(
-          userId,
-          `Successfully added to "${chat.title}"! Use /setup to configure tracking.`
-        );
-      } catch (error) {
-        console.error("Failed to send initial message:", error);
-        bot.sendMessage(
-          userId,
-          "⚠️ Added but couldn't send test message. Please verify my permissions."
-        );
+      for (let i = 0; i < maxRetries && !messageSent; i++) {
+        try {
+          if (i > 0) {
+            console.log(`Retry attempt ${i + 1} for ${chatType} ${sendToId}`);
+          }
+          await bot.sendMessage(
+            sendToId,
+            "✅ Bot setup initialized! I'll send transaction notifications here."
+          );
+          messageSent = true;
+          console.log(
+            `Initial message sent successfully to ${chatType} ${sendToId}`
+          );
+        } catch (error) {
+          console.error(
+            `Attempt ${i + 1} failed for ${chatType} ${sendToId}:`,
+            error.message
+          );
+          if (i < maxRetries - 1) {
+            await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          }
+        }
       }
+
+      // Send setup completion message to user
+      bot.sendMessage(
+        userId,
+        messageSent
+          ? `Successfully added to "${chat.title}"! Use /setup to configure tracking.`
+          : `Added to "${chat.title}" but couldn't verify message permissions. You can still proceed with /setup and verify permissions later.`
+      );
     } catch (error) {
       console.error("Setup error:", error);
       bot.sendMessage(userId, "Setup error occurred. Please try again.");
@@ -281,6 +331,15 @@ bot.onText(/\/setup/, async (msg) => {
     const groupName = msg.chat.title;
 
     try {
+      const chatMember = await bot.getChatMember(chatId, msg.from.id);
+      if (!["creator", "administrator"].includes(chatMember.status)) {
+        return bot.sendMessage(
+          chatId,
+          "Only group administrators can configure the bot."
+        );
+      }
+
+      // Check bot permissions
       const botMember = await bot.getChatMember(chatId, bot.options.username);
       if (botMember.status !== "administrator") {
         return bot.sendMessage(chatId, "Please make me an admin first!");
@@ -384,7 +443,7 @@ bot.on("callback_query", async (query) => {
       const chatId = callbackData.split("_")[2];
       const config = await GroupConfig.findOne({
         chatId,
-        admin_id: userId.toString(), // Important: Verify user is admin
+        admin_id: userId.toString(),
       });
 
       if (!config) {
@@ -394,6 +453,17 @@ bot.on("callback_query", async (query) => {
         );
       }
 
+      // Reset both token and chain when reconfiguring token
+      await GroupConfig.findOneAndUpdate(
+        { chatId },
+        {
+          $set: {
+            "tracking.token.address": null,
+            "tracking.token.chain": null,
+          },
+        }
+      );
+
       bot.sendMessage(
         userId,
         `Configuring ${config.name}\nPlease enter the token address (format: 0x...)`
@@ -402,29 +472,68 @@ bot.on("callback_query", async (query) => {
     } else if (callbackData.startsWith("set_chain_")) {
       const [_, __, chain, chatId] = callbackData.split("_");
 
-      // Validate chain
-      if (!VALID_CHAINS.find((c) => c.id === chain)) {
+      // Get config with token address
+      const config = await GroupConfig.findOne({ chatId });
+      if (!config?.tracking?.token?.address) {
         return bot.sendMessage(
           userId,
-          "Invalid chain selected. Please try again."
+          "Token address not found. Please start over."
         );
       }
 
-      await GroupConfig.findOneAndUpdate(
-        { chatId },
-        {
-          $set: {
-            "tracking.token.chain": chain,
-          },
-        }
-      );
+      try {
+        // Fetch token metadata first
+        const metadata = await fetchTokenMetadata(
+          config.tracking.token.address,
+          chain
+        );
 
-      const chainInfo = VALID_CHAINS.find((c) => c.id === chain);
-      bot.sendMessage(
-        userId,
-        `Chain set to ${chainInfo.icon} ${chainInfo.name}! Now enter the minimum transaction value in USD:`
-      );
-      userSessions[userId] = { step: "awaiting_minvalue", chatId };
+        // Update config and metadata in parallel
+        await Promise.all([
+          GroupConfig.findOneAndUpdate(
+            { chatId },
+            { $set: { "tracking.token.chain": chain } }
+          ),
+          TokenMetadata.findOneAndUpdate(
+            {
+              address: config.tracking.token.address,
+              chain,
+            },
+            {
+              $set: {
+                name: metadata.name,
+                symbol: metadata.symbol,
+                decimals: metadata.decimals,
+                logo: metadata.logo,
+                fully_diluted_valuation: metadata.fully_diluted_valuation,
+                last_updated: new Date(),
+              },
+            },
+            { upsert: true }
+          ),
+        ]);
+
+        const chainInfo = VALID_CHAINS.find((c) => c.id === chain);
+
+        bot.sendMessage(
+          userId,
+          `✅ ${metadata.name} (${metadata.symbol}) configured successfully!\n\n` +
+            `Chain: ${chainInfo.icon} ${chainInfo.name}\n` +
+            `Market Cap: $${Number(
+              metadata.fully_diluted_valuation
+            ).toLocaleString()}\n` +
+            `Verified: ${metadata.verified_contract ? "✅" : "❌"}\n\n` +
+            `Now enter the minimum transaction value in USD:`
+        );
+
+        userSessions[userId] = { step: "awaiting_minvalue", chatId };
+      } catch (error) {
+        console.error("Token metadata error:", error);
+        bot.sendMessage(
+          userId,
+          "❌ Error validating token on this chain. Please verify token address and chain are correct."
+        );
+      }
     } else if (callbackData.startsWith("set_transtype_")) {
       const [_, __, type, chatId] = callbackData.split("_");
 
@@ -585,11 +694,10 @@ bot.on("callback_query", async (query) => {
       }
 
       const keyboard = [
-        [{ text: "Configure Token", callback_data: `config_token_${chatId}` }],
         [
           {
-            text: "Configure Chain",
-            callback_data: `set_chain_menu_${chatId}`,
+            text: "Configure Token & Chain",
+            callback_data: `config_token_${chatId}`,
           },
         ],
         [{ text: "Set Min Value", callback_data: `config_minvalue_${chatId}` }],
@@ -601,7 +709,7 @@ bot.on("callback_query", async (query) => {
         ],
       ];
 
-      if (config.tracking?.token?.address) {
+      if (config.tracking?.token?.address && config.tracking?.token?.chain) {
         keyboard.push([
           {
             text: config.tracking.active ? "Stop Tracking" : "Start Tracking",
@@ -815,6 +923,8 @@ function startPolling() {
   fetchInterval = setInterval(fetchAndStoreSwaps, 30000); // Every 30 seconds
   processInterval = setInterval(() => processStoredSwaps(bot), 10000); // Every 10 seconds
   cleanupInterval = setInterval(cleanupOldSwaps, 24 * 60 * 60 * 1000); // Once a day
+
+  setInterval(updateTokenMetadata, 60000);
 
   console.log("Polling services started");
 }

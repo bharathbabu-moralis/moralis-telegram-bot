@@ -1,5 +1,6 @@
 const axios = require("axios");
 const GroupConfig = require("./models/GroupConfig");
+const TokenMetadata = require("./models/TokenMetadata");
 const SwapData = require("./models/SwapData");
 const Chain = require("./models/Chain");
 const Queue = require("better-queue");
@@ -183,10 +184,32 @@ async function fetchAndStoreSwaps() {
 // Process stored swaps
 async function processStoredSwaps(bot) {
   try {
-    const uniqueTokens = await getUniqueActiveTokens();
+    // First get unique token configurations
+    const activeTokens = await GroupConfig.aggregate([
+      {
+        $match: {
+          "tracking.active": true,
+          "tracking.token.address": { $exists: true },
+          "tracking.token.chain": { $exists: true },
+          "tracking.startTime": { $exists: true },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            address: "$tracking.token.address",
+            chain: "$tracking.token.chain",
+          },
+          configs: { $push: "$$ROOT" },
+        },
+      },
+    ]);
 
-    for (const tokenGroup of uniqueTokens) {
+    console.log(`Processing ${activeTokens.length} active token configs`);
+
+    for (const tokenGroup of activeTokens) {
       const { address, chain } = tokenGroup._id;
+      console.log(`Processing token ${address} on ${chain}`);
 
       const unprocessedSwaps = await SwapData.find({
         tokenAddress: address,
@@ -197,12 +220,20 @@ async function processStoredSwaps(bot) {
         .limit(50)
         .lean();
 
+      console.log(`Found ${unprocessedSwaps.length} unprocessed swaps`);
+
       if (unprocessedSwaps.length === 0) continue;
 
       const chainInfo = await Chain.findOne({ chain_name: chain }).lean();
-      if (!chainInfo) continue;
+      if (!chainInfo) {
+        console.log(`Chain info not found for ${chain}`);
+        continue;
+      }
 
       for (const swapData of unprocessedSwaps) {
+        const swap = swapData.swap_data;
+        console.log(`Processing swap ${swapData.transaction_hash}:
+        `);
         try {
           const swap = swapData.swap_data;
           const swapTimestamp = new Date(swap.block_timestamp);
@@ -222,24 +253,41 @@ async function processStoredSwaps(bot) {
               config.tracking.startTime &&
               swapTimestamp < new Date(config.tracking.startTime)
             ) {
+              console.log(
+                `Skipping swap - before start time for ${config.name}`
+              );
               continue;
             }
 
             const { minValue, transactionType } = config.tracking.filters;
 
             // Check criteria
-            if (swapAmount < minValue) continue;
+            if (swapAmount < minValue) {
+              console.log(
+                `Skipping swap - below min value ${minValue} for ${config.name}`
+              );
+              continue;
+            }
 
             const matchesType =
               transactionType === "both" ||
               transactionType === swap.transaction_type;
 
-            if (!matchesType) continue;
+            if (!matchesType) {
+              console.log(
+                `Skipping swap - wrong type ${swap.transaction_type} for ${config.name}`
+              );
+              continue;
+            }
 
+            console.log(`Adding notification for ${config.name}`);
             notifications.push(config);
           }
 
           if (notifications.length > 0) {
+            console.log(
+              `Preparing to send ${notifications.length} notifications`
+            );
             const messageTemplate = await prepareMessageTemplate(
               swap,
               chainInfo,
@@ -250,6 +298,9 @@ async function processStoredSwaps(bot) {
             await Promise.allSettled(
               notifications.map(async (config) => {
                 try {
+                  console.log(
+                    `Notification sent successfully to ${config.chatId}`
+                  );
                   await sendNotification(bot, config, messageTemplate);
                   await SwapData.updateOne(
                     { _id: swapData._id },
@@ -316,10 +367,19 @@ async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
   const trackedTokenIsToken0 =
     swap.token0.address.toLowerCase() === trackedTokenAddress.toLowerCase();
   const trackedToken = trackedTokenIsToken0 ? swap.token0 : swap.token1;
+  const otherToken = trackedTokenIsToken0 ? swap.token1 : swap.token0;
   const price = trackedToken.usd_price.toFixed(2);
   const tokenSpent = swap.token_sold === "token0" ? swap.token0 : swap.token1;
   const tokenReceived =
     swap.token_bought === "token1" ? swap.token1 : swap.token0;
+
+  const tradeUrl = `${chainInfo.swap_url_base}${swap.token0.address}/${swap.token1.address}`;
+
+  // Get latest metadata for market cap
+  const metadata = await TokenMetadata.findOne({
+    address: trackedTokenAddress,
+    chain: chainInfo.chain_name,
+  }).lean();
 
   return {
     type: isBuyTransaction ? "🟢 Buy" : "🔴 Sell",
@@ -336,11 +396,15 @@ async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
       },
     },
     price,
+    marketCap: metadata?.fully_diluted_valuation
+      ? `$${Number(metadata.fully_diluted_valuation).toLocaleString()}`
+      : "N/A",
     wallet: swap.wallet_address,
     urls: {
       explorer: chainInfo.explorer_url,
       tx: swap.transaction_hash,
       chart: `${chainInfo.chart_url_base}${trackedTokenAddress}`,
+      trade: tradeUrl,
     },
   };
 }
@@ -360,23 +424,25 @@ async function sendNotification(bot, config, template) {
   const emoji = (config.customization?.emoji || "⚡️").repeat(emojiCount);
 
   const message = `
-${template.type} on ${template.exchange}!\n\n
-${emoji}\n\n
-💲 Spent: $${template.amounts.spent.usd} (${template.amounts.spent.tokens} ${
+  ${template.type} on ${template.exchange}!\n\n
+  ${emoji}\n\n
+  💲 Spent: $${template.amounts.spent.usd} (${template.amounts.spent.tokens} ${
     template.amounts.spent.symbol
   })\n
-💱 Got: ${template.amounts.received.tokens} ${
+  💱 Got: ${template.amounts.received.tokens} ${
     template.amounts.received.symbol
   } Tokens\n
-🤵‍♂️ Wallet: <a href="${template.urls.explorer}/address/${
+  🤵‍♂️ Wallet: <a href="${template.urls.explorer}/address/${
     template.wallet
   }">${template.wallet.slice(0, 6)}...${template.wallet.slice(-4)}</a>\n
-💵 Price: $${template.price}\n\n
-<a href="${template.urls.explorer}/tx/${template.urls.tx}">TX</a> | <a href="${
-    template.urls.chart
-  }">Chart</a>
-  `.trim();
-
+  💵 Price: $${template.price}\n
+  💰 MCap: ${template.marketCap}\n\n
+  <a href="${template.urls.explorer}/tx/${
+    template.urls.tx
+  }">TX</a> | <a href="${template.urls.chart}">Chart</a> | <a href="${
+    template.urls.trade
+  }">Trade</a>
+`.trim();
   return new Promise((resolve, reject) => {
     messageQueue.push(
       {
