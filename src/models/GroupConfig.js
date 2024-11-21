@@ -82,6 +82,16 @@ const groupConfigSchema = new mongoose.Schema(
         type: String,
         default: "⚡️",
       },
+      customLinks: [
+        {
+          text: String,
+          url: String,
+          active: {
+            type: Boolean,
+            default: true,
+          },
+        },
+      ],
     },
     metadata: {
       createdAt: {

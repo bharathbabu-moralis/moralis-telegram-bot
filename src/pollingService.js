@@ -284,57 +284,62 @@ async function processStoredSwaps(bot) {
             notifications.push(config);
           }
 
+          // Inside processStoredSwaps, where we handle notifications
           if (notifications.length > 0) {
             console.log(
               `Preparing to send ${notifications.length} notifications`
             );
-            const messageTemplate = await prepareMessageTemplate(
-              swap,
-              chainInfo,
-              address
-            );
 
-            // Send notifications
-            await Promise.allSettled(
-              notifications.map(async (config) => {
-                try {
-                  console.log(
-                    `Notification sent successfully to ${config.chatId}`
-                  );
-                  await sendNotification(bot, config, messageTemplate);
-                  await SwapData.updateOne(
-                    { _id: swapData._id },
-                    {
-                      $push: {
-                        notifications: {
-                          chatId: config.chatId,
-                          sentAt: new Date(),
-                          success: true,
-                        },
+            // Process each notification with its config
+            for (const notificationConfig of notifications) {
+              try {
+                const messageTemplate = await prepareMessageTemplate(
+                  swap,
+                  chainInfo,
+                  address,
+                  notificationConfig // Pass the specific config for this notification
+                );
+
+                console.log(
+                  `Sending notification to ${notificationConfig.chatId}`
+                );
+                await sendNotification(
+                  bot,
+                  notificationConfig,
+                  messageTemplate
+                );
+                await SwapData.updateOne(
+                  { _id: swapData._id },
+                  {
+                    $push: {
+                      notifications: {
+                        chatId: notificationConfig.chatId,
+                        sentAt: new Date(),
+                        success: true,
                       },
-                    }
-                  );
-                } catch (error) {
-                  console.error(
-                    `Notification failed for ${config.chatId}:`,
-                    error.message
-                  );
-                  await SwapData.updateOne(
-                    { _id: swapData._id },
-                    {
-                      $push: {
-                        notifications: {
-                          chatId: config.chatId,
-                          sentAt: new Date(),
-                          success: false,
-                          error: error.message,
-                        },
+                    },
+                  }
+                );
+              } catch (error) {
+                console.error(
+                  `Notification failed for ${notificationConfig.chatId}:`,
+                  error.message
+                );
+                await SwapData.updateOne(
+                  { _id: swapData._id },
+                  {
+                    $push: {
+                      notifications: {
+                        chatId: notificationConfig.chatId,
+                        sentAt: new Date(),
+                        success: false,
+                        error: error.message,
                       },
-                    }
-                  );
-                }
-              })
-            );
+                    },
+                  }
+                );
+              }
+            }
           }
 
           // Mark as processed
@@ -362,20 +367,22 @@ async function processStoredSwaps(bot) {
 }
 
 // Helper function to prepare notification message
-async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
+async function prepareMessageTemplate(
+  swap,
+  chainInfo,
+  trackedTokenAddress,
+  config
+) {
   const isBuyTransaction = swap.transaction_type === "buy";
   const trackedTokenIsToken0 =
     swap.token0.address.toLowerCase() === trackedTokenAddress.toLowerCase();
   const trackedToken = trackedTokenIsToken0 ? swap.token0 : swap.token1;
-  const otherToken = trackedTokenIsToken0 ? swap.token1 : swap.token0;
   const price = trackedToken.usd_price.toFixed(2);
   const tokenSpent = swap.token_sold === "token0" ? swap.token0 : swap.token1;
   const tokenReceived =
     swap.token_bought === "token1" ? swap.token1 : swap.token0;
 
-  const tradeUrl = `${chainInfo.swap_url_base}${swap.token0.address}/${swap.token1.address}`;
-
-  // Get latest metadata for market cap
+  // Get metadata for market cap
   const metadata = await TokenMetadata.findOne({
     address: trackedTokenAddress,
     chain: chainInfo.chain_name,
@@ -383,7 +390,9 @@ async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
 
   return {
     type: isBuyTransaction ? "🟢 Buy" : "🔴 Sell",
-    exchange: swap.pair_label || "Unknown Exchange",
+    exchangeName: swap.exchange_name || "Unknown Exchange",
+    pairLabel: swap.pair_label || "Unknown Pair",
+    subCategory: swap.sub_category || "Unknown",
     amounts: {
       spent: {
         usd: Math.abs(tokenSpent.usd_amount).toFixed(2),
@@ -404,8 +413,10 @@ async function prepareMessageTemplate(swap, chainInfo, trackedTokenAddress) {
       explorer: chainInfo.explorer_url,
       tx: swap.transaction_hash,
       chart: `${chainInfo.chart_url_base}${trackedTokenAddress}`,
-      trade: tradeUrl,
+      trade: `${chainInfo.swap_url_base}${swap.token0.address}/${swap.token1.address}`,
     },
+    customLinks:
+      config?.customization?.customLinks?.filter((l) => l.active) || [],
   };
 }
 
@@ -424,25 +435,31 @@ async function sendNotification(bot, config, template) {
   const emoji = (config.customization?.emoji || "⚡️").repeat(emojiCount);
 
   const message = `
-  ${template.type} on ${template.exchange}!\n\n
+  ${template.type} on ${template.pairLabel} (${template.exchangeName})!\n\n
   ${emoji}\n\n
   💲 Spent: $${template.amounts.spent.usd} (${template.amounts.spent.tokens} ${
     template.amounts.spent.symbol
   })\n
   💱 Got: ${template.amounts.received.tokens} ${
     template.amounts.received.symbol
-  } Tokens\n
+  }\n
+  📊 Type: ${template.subCategory}\n
   🤵‍♂️ Wallet: <a href="${template.urls.explorer}/address/${
     template.wallet
   }">${template.wallet.slice(0, 6)}...${template.wallet.slice(-4)}</a>\n
   💵 Price: $${template.price}\n
-  💰 MCap: ${template.marketCap}\n\n
+  💹 MCap: ${template.marketCap}\n\n
   <a href="${template.urls.explorer}/tx/${
     template.urls.tx
   }">TX</a> | <a href="${template.urls.chart}">Chart</a> | <a href="${
     template.urls.trade
-  }">Trade</a>
-`.trim();
+  }">Trade</a> ${
+    config.customization?.customLinks
+      ?.filter((l) => l.active)
+      .map((link) => `| <a href="${link.url}">${link.text}</a>`)
+      .join(" ") || ""
+  }
+  `.trim();
   return new Promise((resolve, reject) => {
     messageQueue.push(
       {

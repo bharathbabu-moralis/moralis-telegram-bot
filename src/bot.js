@@ -706,6 +706,12 @@ bot.on("callback_query", async (query) => {
             callback_data: `config_transtype_${chatId}`,
           },
         ],
+        [
+          {
+            text: "Manage Custom Links",
+            callback_data: `config_links_${chatId}`,
+          },
+        ],
       ];
 
       if (config.tracking?.token?.address && config.tracking?.token?.chain) {
@@ -783,6 +789,197 @@ bot.on("callback_query", async (query) => {
                 callback_data: `set_transtype_sell_${chatId}`,
               },
               { text: "Both", callback_data: `set_transtype_both_${chatId}` },
+            ],
+          ],
+        },
+      });
+    } else if (callbackData.startsWith("config_links_")) {
+      const chatId = callbackData.split("_")[2];
+      const config = await GroupConfig.findOne({
+        chatId,
+        admin_id: userId.toString(),
+      });
+
+      if (!config) {
+        return bot.sendMessage(
+          userId,
+          "You don't have permission to manage this chat."
+        );
+      }
+
+      const keyboard = [
+        [{ text: "➕ Add New Link", callback_data: `add_link_${chatId}` }],
+      ];
+
+      // Show existing links if any
+      if (config.customization?.customLinks?.length > 0) {
+        config.customization.customLinks.forEach((link, index) => {
+          keyboard.push([
+            {
+              text: `${link.text} (${link.active ? "✅" : "❌"})`,
+              callback_data: `edit_link_${chatId}_${index}`,
+            },
+            { text: "🗑️", callback_data: `delete_link_${chatId}_${index}` },
+          ]);
+        });
+      }
+
+      keyboard.push([{ text: "« Back", callback_data: `manage_${chatId}` }]);
+
+      bot.sendMessage(
+        userId,
+        "Custom Links Management:\nThese links will appear in notifications alongside TX, Chart, and Trade buttons.",
+        {
+          reply_markup: { inline_keyboard: keyboard },
+        }
+      );
+    } else if (callbackData.startsWith("add_link_")) {
+      const chatId = callbackData.split("_")[2];
+      const config = await GroupConfig.findOne({
+        chatId,
+        admin_id: userId.toString(),
+      });
+
+      if (!config) {
+        return bot.sendMessage(
+          userId,
+          "You don't have permission to manage this chat."
+        );
+      }
+
+      userSessions[userId] = {
+        step: "awaiting_link_text",
+        chatId,
+        linkData: {},
+      };
+
+      bot.sendMessage(
+        userId,
+        "Enter the text to display for the link (max 10 characters):",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "« Cancel", callback_data: `config_links_${chatId}` }],
+            ],
+          },
+        }
+      );
+    } else if (callbackData.startsWith("edit_link_")) {
+      const [_, __, chatId, index] = callbackData.split("_");
+      const config = await GroupConfig.findOne({
+        chatId,
+        admin_id: userId.toString(),
+      });
+
+      if (!config) {
+        return bot.sendMessage(
+          userId,
+          "You don't have permission to manage this chat."
+        );
+      }
+
+      const link = config.customization?.customLinks?.[index];
+      if (!link) {
+        return bot.sendMessage(userId, "Link not found.");
+      }
+
+      const keyboard = [
+        [
+          {
+            text: link.active ? "Deactivate" : "Activate",
+            callback_data: `toggle_link_${chatId}_${index}`,
+          },
+        ],
+        [
+          {
+            text: "Edit Text",
+            callback_data: `edit_link_text_${chatId}_${index}`,
+          },
+          {
+            text: "Edit URL",
+            callback_data: `edit_link_url_${chatId}_${index}`,
+          },
+        ],
+        [{ text: "« Back", callback_data: `config_links_${chatId}` }],
+      ];
+
+      bot.sendMessage(
+        userId,
+        `Link Details:\nText: ${link.text}\nURL: ${link.url}\nStatus: ${
+          link.active ? "Active" : "Inactive"
+        }`,
+        {
+          reply_markup: { inline_keyboard: keyboard },
+        }
+      );
+    } else if (callbackData.startsWith("toggle_link_")) {
+      const [_, __, chatId, index] = callbackData.split("_");
+      const config = await GroupConfig.findOne({
+        chatId,
+        admin_id: userId.toString(),
+      });
+
+      if (!config) {
+        return bot.sendMessage(
+          userId,
+          "You don't have permission to manage this chat."
+        );
+      }
+
+      const link = config.customization?.customLinks?.[index];
+      if (!link) {
+        return bot.sendMessage(userId, "Link not found.");
+      }
+
+      // Toggle active status
+      config.customization.customLinks[index].active = !link.active;
+      await config.save();
+
+      // Return to links management
+      bot.sendMessage(
+        userId,
+        `Link ${link.text} ${link.active ? "deactivated" : "activated"}.`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "« Back to Links",
+                  callback_data: `config_links_${chatId}`,
+                },
+              ],
+            ],
+          },
+        }
+      );
+    } else if (callbackData.startsWith("delete_link_")) {
+      const [_, __, chatId, index] = callbackData.split("_");
+      const config = await GroupConfig.findOne({
+        chatId,
+        admin_id: userId.toString(),
+      });
+
+      if (!config) {
+        return bot.sendMessage(
+          userId,
+          "You don't have permission to manage this chat."
+        );
+      }
+
+      // Remove link
+      if (config.customization?.customLinks) {
+        config.customization.customLinks.splice(index, 1);
+        await config.save();
+      }
+
+      bot.sendMessage(userId, "Link deleted successfully.", {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "« Back to Links",
+                callback_data: `config_links_${chatId}`,
+              },
             ],
           ],
         },
@@ -900,6 +1097,72 @@ bot.on("message", async (msg) => {
         }
       );
       delete userSessions[userId];
+    } else if (session.step === "awaiting_link_text") {
+      const text = msg.text.trim();
+      if (text.length > 10) {
+        return bot.sendMessage(
+          userId,
+          "Link text must be 10 characters or less. Try again:"
+        );
+      }
+
+      session.linkData.text = text;
+      userSessions[userId].step = "awaiting_link_url";
+      bot.sendMessage(
+        userId,
+        "Enter the URL for the link (must start with http:// or https://):",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: "« Cancel",
+                  callback_data: `config_links_${session.chatId}`,
+                },
+              ],
+            ],
+          },
+        }
+      );
+    } else if (session.step === "awaiting_link_url") {
+      const url = msg.text.trim();
+      if (!url.startsWith("http://") && !url.startsWith("https://")) {
+        return bot.sendMessage(
+          userId,
+          "Please enter a valid URL starting with http:// or https://"
+        );
+      }
+
+      const { chatId, linkData } = session;
+      await GroupConfig.findOneAndUpdate(
+        {
+          chatId,
+          admin_id: userId.toString(),
+        },
+        {
+          $push: {
+            "customization.customLinks": {
+              text: linkData.text,
+              url: url,
+              active: true,
+            },
+          },
+        }
+      );
+
+      delete userSessions[userId];
+      bot.sendMessage(userId, "Custom link added successfully!", {
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: "« Back to Links",
+                callback_data: `config_links_${chatId}`,
+              },
+            ],
+          ],
+        },
+      });
     }
   } catch (error) {
     console.error("Message handler error:", error);
